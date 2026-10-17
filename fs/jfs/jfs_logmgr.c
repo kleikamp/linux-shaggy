@@ -1243,6 +1243,7 @@ int lmLogInit(struct jfs_log * log)
 	struct lbuf *bp;
 	struct logpage *lp;
 	int lsn = 0;
+	u32 sb_size, sb_l2bsize, sb_end;
 
 	jfs_info("lmLogInit: log:0x%p", log);
 
@@ -1316,14 +1317,41 @@ int lmLogInit(struct jfs_log * log)
 				rc = -EINVAL;
 				goto errout20;
 			}
-			log->size = le32_to_cpu(logsuper->size);
-			log->l2bsize = le32_to_cpu(logsuper->l2bsize);
+
+			/*
+			 * l2bsize is a shift count, so the block size has to be
+			 * 512..4096 bytes. size is shifted into the signed
+			 * log->logsize, and pages 0 and 1 are reserved.
+			 */
+			sb_size = le32_to_cpu(logsuper->size);
+			sb_l2bsize = le32_to_cpu(logsuper->l2bsize);
+			if (sb_l2bsize < 9 || sb_l2bsize > L2LOGPSIZE ||
+			    sb_size <= LOGSTART_B ||
+			    sb_size - 2 > (u32)(INT_MAX >> L2LOGPSIZE)) {
+				jfs_warn("invalid external log superblock");
+				rc = -EINVAL;
+				goto errout20;
+			}
+			log->size = sb_size;
+			log->l2bsize = sb_l2bsize;
 			jfs_info("lmLogInit: external log:0x%p base:0x%Lx size:0x%x",
 				 log, (unsigned long long)log->base, log->size);
 		}
 
-		log->page = le32_to_cpu(logsuper->end) / LOGPSIZE;
-		log->eor = le32_to_cpu(logsuper->end) - (LOGPSIZE * log->page);
+		/*
+		 * end selects the current log page. It has to be a data
+		 * page inside this log.
+		 */
+		sb_end = le32_to_cpu(logsuper->end);
+		if (log->size <= LOGSTART_B ||
+		    sb_end / LOGPSIZE < LOGSTART_B ||
+		    sb_end / LOGPSIZE >= (u32)log->size) {
+			jfs_warn("log end is out of range");
+			rc = -EINVAL;
+			goto errout20;
+		}
+		log->page = sb_end / LOGPSIZE;
+		log->eor = sb_end - LOGPSIZE * log->page;
 
 		/*
 		 * initialize for log append write mode
